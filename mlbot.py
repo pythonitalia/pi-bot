@@ -132,7 +132,7 @@ class MailingListBot:
             self.last_check = day
             bot.send_message(chat_id=update.message.chat_id, text='Setting last check: ' + human_date(day))
         except ValueError:
-            bot.send_message(chat_id=update.message.chat_id, text='Send a date in unambiguous format (e.g. yyyy-mm-dd)')
+            bot.send_message(chat_id=update.message.chat_id, text='Sorry, I did not understand. Please, send dates in unambiguous format (e.g. yyyy-mm-dd)')
 
     def check_new_threads(self, bot, job):
         '''This function is called periodically to check if new threads are present since last check.'''
@@ -167,26 +167,29 @@ class MailingListBot:
         '''Prints threads in a specified year-month'''
 
         # Parse arguments as date
-        date = maya.when(' '.join(args)).datetime()
-        # If we couldn't parse, use now
-        if date is None:
-            date = now()
-        # Get arguments in suitable format
-        args = (str(date.year), self.month_names[date.month])
-        # Output string we are building
+        try:
+            date = maya.when(' '.join(args)).datetime()
+            # If we couldn't parse, use now
+            if date is None:
+                date = now()
+            # Get arguments in suitable format
+            args = (str(date.year), self.month_names[date.month])
+            # Output string we are building
 
-        rows = []
-        base_url = get_month_url(*args)
-        for td, tm, tu in threads_for_month(*args):
-            rows.append(build_thread_row(td, tm, base_url+tu))
+            rows = []
+            base_url = get_month_url(*args)
+            for td, tm, tu in threads_for_month(*args):
+                rows.append(build_thread_row(td, tm, base_url+tu))
 
-        out = '<b>Threads {} {}</b>\n'.format(*args)
-        for msg in paginate_message([out] + rows):
-            bot.send_message(
-                chat_id=update.message.chat_id,
-                parse_mode=telegram.ParseMode.HTML,
-                text=msg,
-            )
+            out = '<b>Threads {} {}</b>\n'.format(*args)
+            for msg in paginate_message([out] + rows):
+                bot.send_message(
+                    chat_id=update.message.chat_id,
+                    parse_mode=telegram.ParseMode.HTML,
+                    text=msg,
+                )
+        except ValueError:
+            bot.send_message(chat_id=update.message.chat_id, text='Sorry, I did not understand. Please, send dates in unambiguous format (e.g. yyyy-mm-dd)')
 
     def start(self, bot, update, job_queue):
         '''Starts the bot, setting up repeated check and printing welcome message'''
