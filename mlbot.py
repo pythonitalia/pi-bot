@@ -8,70 +8,41 @@ from telegram.ext import CommandHandler
 
 # Calendar for month names
 import calendar
-# Copy month names before locale
-month_names = list(calendar.month_name)
-short_month_names = list(calendar.month_abbr)
-
 # Scraping mailing list archives
 from bs4 import BeautifulSoup
 from urllib import request
+from urllib.error import HTTPError
 
 # Set italian locale
 import locale
-locale.setlocale(locale.LC_TIME, 'it_IT')
 
 # Date parsing
 import maya
+import datetime as dt
+import dateparser as dp
 
 # Some logging
 import logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# When was the page last checked?
-last_check = maya.now()
+def now():
+    return maya.now().datetime()
+
+def human_date(d):
+    '''Returns a formatted string for date'''
+    return dt.datetime.strftime(d, '%c')
 
 def get_date(mail_url):
     '''Given URL of a mail, parse its date'''
+
     page = request.urlopen(mail_url).read()
     soup = BeautifulSoup(page, 'lxml')
-    return soup.body.i.string
-
-def get_month(s):
-    '''Get full name of a month given abbreviation (or None).
-    e.g.
-        january -> January
-        JAN -> January
-        foo -> None
-        None -> <name of current month>'''
-
-    if s is None:
-        return month_names[maya.now().month]
-    s = s.capitalize()
-    if s in month_names:
-        return s
-    try:
-        i = short_month_names.index(s)
-        return month_names[i]
-    except ValueError:
-        return None
-
-def pipermail_combo(args):
-    '''Returns a ('year', 'month') tuple to be used in pipermail URLs.'''
-
-    cur_year = str(maya.now().year)
-    if args is None or len(args) == 0:
-        # If args is None or empy, returns current year and month
-        return (cur_year, get_month(None))
-    elif len(args) == 1:
-        # If only one was provided, try to check if it's year or month
-        # and fill missing value
-        if args[0].isnumeric():
-            return (args[0], get_month(None))
-        else:
-            return (cur_year, get_month(args[0]))
-    if args[0].isnumeric():
-        return (args[0], get_month(args[1]))
-    return (cur_year, get_month(args[1]))
+    post_date = soup.body.i.string
+    # Try parsing expected formats
+    date = dp.parse(post_date, date_formats=['%a %d %b %Y %H:%M:%S %Z', '%a %d %B %Y %H:%M:%S %Z'], settings={'RETURN_AS_TIMEZONE_AWARE': True})
+    # If fail, try automatic parser
+    if date is None:
+        date = dp.parse(post_date, settings={'RETURN_AS_TIMEZONE_AWARE': True})
+    return date
 
 def get_month_url(year, month):
     '''Return the URL of the page containing month threads'''
@@ -81,10 +52,15 @@ def get_month_url(year, month):
 def threads_for_month(year, month):
     '''Generates threads in the specified month'''
 
-    base_url = get_month_url(year, month)
-    thread_url = base_url + 'thread.html'
-    logging.info('Reading page %s', thread_url)
-    page = request.urlopen(thread_url).read()
+    try:
+        base_url = get_month_url(year, month)
+        thread_url = base_url + 'thread.html'
+        logging.info('Reading page %s', thread_url)
+        page = request.urlopen(thread_url).read()
+    except HTTPError:
+        # Page not found, return
+        return
+
     # pipermail omits closing tags: html.parser fails to parse correctly
     soup = BeautifulSoup(page, 'lxml')
     # Extract the first level of the hierarchy
@@ -93,126 +69,153 @@ def threads_for_month(year, month):
     for t in topics:
         msg = t.a.string.strip()
         url = t.a.get('href')
-        post_date = get_date(base_url + url)
-        # XXX HORRIBLE patch below! XXX
-        # dateparser has a bug with italian Tuesday abbreviation
-        # it will not parse correctly Mar 7 Mar 2017 (Tue 7 Mar 2017)
-        # so we skip the day of the week if "Mar" present
-        # FIXME
-        # Check status of https://github.com/scrapinghub/dateparser/issues/337
-        # before fixing
-        # FIXME
-        if post_date[:3].lower() == 'mar':
-            date = maya.when(post_date[4:])
-        else:
-            date = maya.when(post_date)
+        date = get_date(base_url + url)
         yield (date, msg, url)
-
-def set_last_check(bot, update):
-    '''Changes date of last check. Useful when testing the bot or setting it up.'''
-
-    global last_check
-
-    text = update.message.text
-    logging.info('Setting last check with %s', text)
-
-    try:
-        skip = text.index(' ') + 1
-        day = maya.when(text[skip:])
-        logging.info('Parsed date: %s', day)
-        last_check = day
-        bot.send_message(chat_id=update.message.chat_id, text='Setting last check: ' + day.rfc2822())
-    except ValueError:
-        bot.send_message(chat_id=update.message.chat_id, text='Send a date in unambiguous format (e.g. yyyy-mm-dd)')
-
-def months_after(date):
-    '''Iterates (year,month) tuples after the specified date, till today'''
-
-    today = maya.now()
-    start = 12 * date.year + date.month
-    end = 12 * today.year + today.month + 1
-    for mm in range(start, end):
-        y, m = divmod(mm, 12)
-        yield (str(date.year), month_names[m])
 
 def build_thread_row(date, message, url):
     '''Returns a string for a thread'''
 
-    label = '{} {}'.format(message, date.rfc2822())
+    # Ensure line is not too long (limit for telegram messages is 4096)
+    max_len = 4000 - len(url)
+    message = message.strip()
+    label = '{} {}'.format(message[:max_len], human_date(date))
     return ' - <a href="{}">{}</a>'.format(url, label)
 
-def check_new_threads(bot, job):
-    '''This function is called periodically to check if new threads are present since last check.'''
+def paginate_message(rows):
+    '''Max length for a message is 4096: this will produce shorter chunks'''
+    acc = ''
+    for row in rows:
+        if len(acc + row) + 1 > 4000:
+            yield acc
+            acc = row + '\n'
+        else:
+            acc += row + '\n'
+    yield acc
 
-    global last_check
-    logging.info('Checking for new threads since {}'.format(last_check.rfc2822()))
-    # Threads found
-    new_threads = []
-    # Iterate over all threads after the last check date
-    for year, month in months_after(last_check):
-        base_url = get_month_url(year, month)
-        for td, tm, tu in threads_for_month(year, month):
-            if td <= last_check:
-                continue # Already checked
-            logging.info('Found a thread in month {}-{}'.format(year, month, tm))
-            new_threads.append(build_thread_row(td, tm, base_url+tu))#row)
+class MailingListBot:
+    def __init__(self):
+        # Save month names in english locale
+        locale.setlocale(locale.LC_TIME, 'en_US')
+        self.month_names = list(calendar.month_name)
+        self.short_month_names = list(calendar.month_abbr)
+        # We will use italian dates most of the times
+        locale.setlocale(locale.LC_TIME, 'it_IT')
+        # Time of last check
+        self.last_check = now()
+        # Do we have a recurrent check?
+        self.started = False
 
-    # Set last check
-    last_check = maya.now()
+    def months_after(self, date):
+        '''Iterates (year,month) tuples after the specified date, till today'''
 
-    # Write only if necessary
-    if new_threads:
-        out = '<b>New threads since {}</b>\n'.format(last_check.rfc2822())
-        out += '\n'.join(new_threads)
-        bot.send_message(
-            chat_id=job.context,
-            parse_mode=telegram.ParseMode.HTML,
-            text=out,
-        )
+        today = now()
+        start = 12 * date.year + date.month - 1
+        end = 12 * today.year + today.month
+        for mm in range(start, end):
+            y, m = divmod(mm, 12)
+            yield (str(y), self.month_names[m+1])
 
-def threads(bot, update, args):
-    '''Prints threads in a specified year-month'''
+    def set_last_check(self, bot, update):
+        '''Changes date of last check. Useful when testing the bot or setting it up.'''
 
-    # Parse arguments as date
-    date = maya.when(' '.join(args))
-    # If we couldn't parse, use now
-    if date is None:
-        date = maya.now()
-    # Get arguments in suitable format
-    args = (str(date.year), month_names[date.month])
-    # Output string we are building
-    out = '<b>Threads {} {}</b>\n'.format(*args)
+        if not self.started:
+            bot.send_message(chat_id=update.message.chat_id, text='Bot was not started. Use /start first')
+            return
 
-    base_url = get_month_url(*args)
-    for td, tm, tu in threads_for_month(*args):
-        out += build_thread_row(td, tm, base_url+tu) + '\n'
+        text = update.message.text
+        logging.info('Setting last check with %s', text)
 
-    bot.send_message(
-        chat_id=update.message.chat_id,
-        parse_mode=telegram.ParseMode.HTML,
-        text=out,
-    )
+        try:
+            skip = text.index(' ') + 1
+            day = maya.when(text[skip:]).datetime()
+            logging.info('Parsed date: %s', day)
+            self.last_check = day
+            bot.send_message(chat_id=update.message.chat_id, text='Setting last check: ' + human_date(day))
+        except ValueError:
+            bot.send_message(chat_id=update.message.chat_id, text='Send a date in unambiguous format (e.g. yyyy-mm-dd)')
 
-def start(bot, update, job_queue):
-    '''Starts the bot, setting up repeated check and printing welcome message'''
+    def check_new_threads(self, bot, job):
+        '''This function is called periodically to check if new threads are present since last check.'''
 
-    global last_check
-    last_check = maya.now()
-    bot.send_message(chat_id=update.message.chat_id,
-        text="*Welcome!*\nGet threads with /th 2016 July\nSet Last Check date with /slc 1 maggio 2017\n\nBot will check for new threads every 2 minutes",
-        parse_mode=telegram.ParseMode.MARKDOWN)
-    job_queue.run_repeating(check_new_threads, 120.0, context=update.message.chat_id)
+        logging.info('Checking for new threads since {}'.format(human_date(self.last_check)))
+        # Threads found
+        new_threads = []
+        # Iterate over all threads after the last check date
+        for year, month in self.months_after(self.last_check):
+            base_url = get_month_url(year, month)
+            for td, tm, tu in threads_for_month(year, month):
+                if td <= self.last_check:
+                    continue # Already checked
+                logging.info('Found a thread in month {}-{}'.format(year, month, tm))
+                new_threads.append(build_thread_row(td, tm, base_url+tu))
 
-# Setup bot
-with open('./bot.key') as keyfile:
-    updater = Updater(token=keyfile.read().strip())
+        # Set last check
+        self.last_check = now()
 
-dispatcher = updater.dispatcher
+        # Write only if necessary
+        if new_threads:
+            out = '<b>New threads since {}</b>\n'.format(human_date(self.last_check))
+            for msg in paginate_message([out] + new_threads):
+                bot.send_message(
+                    chat_id=job.context,
+                    parse_mode=telegram.ParseMode.HTML,
+                    text=msg,
+                    #text=out,
+                )
 
-dispatcher.add_handler(CommandHandler('start', start, pass_job_queue=True))
-dispatcher.add_handler(CommandHandler('threads', threads, pass_args=True))
-dispatcher.add_handler(CommandHandler('th', threads, pass_args=True))
-dispatcher.add_handler(CommandHandler('setlastcheck', set_last_check))
-dispatcher.add_handler(CommandHandler('slc', set_last_check))
+    def threads(self, bot, update, args):
+        '''Prints threads in a specified year-month'''
 
-updater.start_polling()
+        # Parse arguments as date
+        date = maya.when(' '.join(args)).datetime()
+        # If we couldn't parse, use now
+        if date is None:
+            date = now()
+        # Get arguments in suitable format
+        args = (str(date.year), self.month_names[date.month])
+        # Output string we are building
+
+        rows = []
+        base_url = get_month_url(*args)
+        for td, tm, tu in threads_for_month(*args):
+            rows.append(build_thread_row(td, tm, base_url+tu))
+
+        out = '<b>Threads {} {}</b>\n'.format(*args)
+        for msg in paginate_message([out] + rows):
+            bot.send_message(
+                chat_id=update.message.chat_id,
+                parse_mode=telegram.ParseMode.HTML,
+                text=msg,
+            )
+
+    def start(self, bot, update, job_queue):
+        '''Starts the bot, setting up repeated check and printing welcome message'''
+
+        self.last_check = now()
+        bot.send_message(chat_id=update.message.chat_id,
+            text="*Welcome!*\nGet threads with /th 2016 July\nSet Last Check date with /slc 1 maggio 2017\n\nBot will check for new threads every 2 minutes",
+            parse_mode=telegram.ParseMode.MARKDOWN)
+        job_queue.run_repeating(self.check_new_threads, 10.0, context=update.message.chat_id)
+        self.started = True
+
+    def run_bot(self):
+        # Setup bot
+        with open('./bot.key') as keyfile:
+            updater = Updater(token=keyfile.read().strip())
+
+        dispatcher = updater.dispatcher
+
+        dispatcher.add_handler(CommandHandler('start', self.start, pass_job_queue=True))
+        dispatcher.add_handler(CommandHandler('threads', self.threads, pass_args=True))
+        dispatcher.add_handler(CommandHandler('th', self.threads, pass_args=True))
+        dispatcher.add_handler(CommandHandler('setlastcheck', self.set_last_check))
+        dispatcher.add_handler(CommandHandler('slc', self.set_last_check))
+
+        updater.start_polling()
+
+if __name__ == '__main__':
+    # Some logging
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    # Create bot and run polling main loop
+    mlb = MailingListBot()
+    mlb.run_bot()
