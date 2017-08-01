@@ -5,14 +5,10 @@ import mlbot
 
 import datetime as dt
 import dateparser as dp
-import locale
 
 class TestPage(unittest.TestCase):
     '''This class tests that the pipermail webpage is still as we expect it.'''
     def test_get_date(self):
-        # Set locale used for dates
-        locale.setlocale(locale.LC_TIME, 'it_IT')
-
         base = 'http://lists.python.it/pipermail/pycon/'
         url_dates = [
             ('2017-May/002516.html', 'Lun 29 Mag 2017 12:20:58 CEST'), # This was "Maggio" on the website

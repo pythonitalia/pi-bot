@@ -6,15 +6,10 @@ from telegram.ext import Job
 from telegram.ext import Updater
 from telegram.ext import CommandHandler
 
-# Calendar for month names
-import calendar
 # Scraping mailing list archives
 from bs4 import BeautifulSoup
 from urllib import request
 from urllib.error import HTTPError
-
-# Set italian locale
-import locale
 
 # Date parsing
 import maya
@@ -94,12 +89,38 @@ def paginate_message(rows):
 
 class MailingListBot:
     def __init__(self):
-        # Save month names in english locale
-        locale.setlocale(locale.LC_TIME, 'en_US')
-        self.month_names = list(calendar.month_name)
-        self.short_month_names = list(calendar.month_abbr)
-        # We will use italian dates most of the times
-        locale.setlocale(locale.LC_TIME, 'it_IT')
+        # Month names to be used in urls
+        self.month_names = [
+            '',
+            'January',
+            'February',
+            'March',
+            'April',
+            'May',
+            'June',
+            'July',
+            'August',
+            'September',
+            'October',
+            'November',
+            'December',
+        ]
+        self.short_month_names = [
+            '',
+            'Jan',
+            'Feb',
+            'Mar',
+            'Apr',
+            'May',
+            'Jun',
+            'Jul',
+            'Aug',
+            'Sep',
+            'Oct',
+            'Nov',
+            'Dec',
+        ]
+
         # Time of last check
         self.last_check = now()
         # Do we have a recurrent check?
@@ -198,7 +219,7 @@ class MailingListBot:
         bot.send_message(chat_id=update.message.chat_id,
             text="*Welcome!*\nGet threads with /th 2016 July\nSet Last Check date with /slc 1 maggio 2017\n\nBot will check for new threads every 2 minutes",
             parse_mode=telegram.ParseMode.MARKDOWN)
-        job_queue.run_repeating(self.check_new_threads, 10.0, context=update.message.chat_id)
+        job_queue.run_repeating(self.check_new_threads, 120.0, context=update.message.chat_id)
         self.started = True
 
     def run_bot(self):
